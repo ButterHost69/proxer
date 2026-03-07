@@ -1,0 +1,9 @@
+# Proxer
+
+Recycles Proxy, endlessly
+
+Features:
+- [ ] Scrapes Publicly available proxies
+- [ ] Uses multiple go func workers to aysnchronously make requests
+- [ ] Response aware, scores proxies based on latency and availibility and response (lowers proxy rating is banned)
+- [ ] Uses redis for submit req/resp
