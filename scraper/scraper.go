@@ -1,19 +1,29 @@
+// Package scraper downloads candidate proxies from a public aggregator
+// and reads them into "ip:port" strings.
 package scraper
 
 import (
 	"bufio"
 	"net/http"
 	"strings"
+
+	"github.com/ButterHost69/proxer/config"
 )
 
-// At the very moment we only support
-// https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt
+// GetProxyList downloads cfg.AggregatorURL, one proxy per non-empty line,
+// bounded by cfg.ScrapeTimeout.
+//
+// The stock http.Get applies no timeout at all, so a silent aggregator
+// could hang a pool refresh forever; the explicit client here cannot.
+func GetProxyList(cfg *config.Config) ([]string, error) {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	cfg = cfg.WithFallbacks()
 
-// Support for other proxy aggregator's will come in the future
+	client := &http.Client{Timeout: cfg.ScrapeTimeout}
 
-// Returns ip:port
-func GetProxyList() ([]string, error) {
-	resp, err := http.Get("https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt")
+	resp, err := client.Get(cfg.AggregatorURL)
 	if err != nil {
 		return []string{}, err
 	}
@@ -27,6 +37,10 @@ func GetProxyList() ([]string, error) {
 		if line != "" {
 			links = append(links, line)
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return links, err
 	}
 
 	return links, nil

@@ -1,1 +1,5 @@
-.env
+# Go build artifacts
+/proxer
+
+# Agent session exports
+.sessions/
