@@ -1,3 +1,5 @@
+// Package proxies maintains the supply side of the pool: scrape, then
+// health-check concurrently, then hand over the survivors as a queue.
 package proxies
 
 import (
@@ -7,12 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ButterHost69/proxer/config"
 	"github.com/ButterHost69/proxer/models"
 	"github.com/ButterHost69/proxer/scraper"
 )
 
-func isProxyAlive(proxy string) bool {
-	conn, err := net.DialTimeout("tcp", proxy, 3*time.Second)
+func isProxyAlive(proxy string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", proxy, timeout)
 	if err != nil {
 		return false
 	}
@@ -20,25 +23,43 @@ func isProxyAlive(proxy string) bool {
 	return true
 }
 
-func GetAliveProxies(numWorkers int) (*models.ProxyList, error) {
+// GetAliveProxies scrapes the aggregator, dials every entry with
+// cfg.Workers concurrent dials of cfg.HealthCheckTimeout and returns a queue
+// holding the survivors.
+//
+// The returned queue is owned by the caller; on error an empty queue is
+// returned alongside the error so callers never have to nil-check it.
+func GetAliveProxies(cfg *config.Config) (*models.ProxyQueue, error) {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	cfg = cfg.WithFallbacks()
 
-	unchecked_proxies, err := scraper.GetProxyList()
-	if err != nil {
-		log.Println("Error while Getting Proxy List: ", err)
-		log.Println("Source: getAliveProxies()")
-		return &models.ProxyList{}, err
+	if cfg.Workers < 1 {
+		return models.NewQueue(), errors.New("workers must be at least 1")
 	}
 
-	n_proxies := len(unchecked_proxies)
-	log.Println("Total proxies: ", n_proxies)
+	candidates, err := scraper.GetProxyList(cfg)
+	if err != nil {
+		log.Println("Error while Getting Proxy List: ", err)
+		log.Println("Source: GetAliveProxies()")
+		return models.NewQueue(), err
+	}
 
-	partitionSize := (n_proxies + numWorkers - 1) / numWorkers // Run Atleast once
+	total := len(candidates)
+	log.Println("Total proxies: ", total)
+
+	if total == 0 {
+		return models.NewQueue(), errors.New("scraper returned no proxies")
+	}
+
+	partitionSize := (total + cfg.Workers - 1) / cfg.Workers // Run Atleast once
 
 	var wg sync.WaitGroup
 	start := 0
-	limit := (n_proxies) % numWorkers
+	limit := total % cfg.Workers
 
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < cfg.Workers; i++ {
 		// Needed for num_files % num_workers != 0
 		if limit != 0 && i == limit {
 			partitionSize -= 1
@@ -51,12 +72,12 @@ func GetAliveProxies(numWorkers int) (*models.ProxyList, error) {
 		// inActive Links are set ""
 		go func(links []string) {
 			for i := range links {
-				if !isProxyAlive(links[i]) {
+				if !isProxyAlive(links[i], cfg.HealthCheckTimeout) {
 					links[i] = ""
 				}
 			}
 			wg.Done()
-		}(unchecked_proxies[start:end])
+		}(candidates[start:end])
 
 		start = end
 	}
@@ -64,7 +85,7 @@ func GetAliveProxies(numWorkers int) (*models.ProxyList, error) {
 
 	var alive []string
 
-	for _, p := range unchecked_proxies {
+	for _, p := range candidates {
 		if p != "" {
 			alive = append(alive, p)
 		}
@@ -73,8 +94,8 @@ func GetAliveProxies(numWorkers int) (*models.ProxyList, error) {
 	log.Println("Alive proxies:", len(alive))
 	if len(alive) == 0 {
 		log.Println("No working proxies")
-		return &models.ProxyList{}, errors.New("no working proxies")
+		return models.NewQueue(), errors.New("no working proxies")
 	}
 
-	return models.CreateProxyList(alive), nil
+	return models.NewQueueFromLinks(alive), nil
 }

@@ -1,89 +1,52 @@
+// Command proxer runs a forward proxy backed by a rotating in-memory pool of
+// public proxies.
+//
+// Point a client at it (curl -x http://proxy.corp.net:8080 http://example.com
+// or a browser whose proxy is proxy.corp.net:8080) and every request is
+// relayed through the next proxy in the pool:
+//
+//	GET http://example.com/index.html HTTP/1.1     (client to proxer)
+//	Host: example.com
+//
+// The pool is an in-memory FIFO queue (see models.ProxyQueue): a proxy that
+// answers is pushed back for the next request, one that fails is dropped.
+// When the pool drains it is refilled from the aggregator, so the process
+// never has to be restarted to recover.
+//
+// Every tunable lives in the config package (see ./proxer -h); main is just
+// wiring.
 package main
 
 import (
-	"fmt"
-	"io"
 	"log"
-	"math/rand"
-	"net/http"
-	"net/url"
-	"os"
-	"time"
 
+	"github.com/ButterHost69/proxer/config"
+	"github.com/ButterHost69/proxer/models"
 	"github.com/ButterHost69/proxer/proxies"
-	"github.com/joho/godotenv"
+	"github.com/ButterHost69/proxer/server"
 )
 
 func main() {
-	// Connect to Redis
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	cfg := config.Load()
 
-	var db RedisDB
+	log.SetFlags(log.LstdFlags)
 
-	err = db.Connect(os.Getenv("REDIS_ADDR"), os.Getenv("REDIS_PASSWORD"))
-	if err != nil {
-		fmt.Println("Error in Connecting the Redis Server")
-		fmt.Println(err)
-	}
+	forwarder := server.NewForwarder(models.NewQueue(), cfg, proxies.GetAliveProxies)
 
-	proxies, err := proxies.GetAliveProxies(600)
-	if err != nil {
-		log.Println("could not retrieve proxy list")
-		return
-	}
+	// Warm the pool in the background so the very first client request
+	// does not have to wait through a scrape; the server keeps serving and
+	// refills on demand if this fails.
+	go func() {
+		if err := forwarder.Warm(); err != nil {
+			log.Printf("initial pool warm-up failed, will retry on demand: %v", err)
 
-	for {
-		proxy := proxies.GetProxy()
-
-		proxyURL, _ := url.Parse("http://" + proxy.GetLink())
-
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				Proxy: http.ProxyURL(proxyURL),
-			},
+			return
 		}
 
-		rand.Seed(time.Now().UnixNano())
-		topics := []string{
-			"golang concurrency",
-			"p2p networking",
-			"distributed systems",
-			"minecraft server mods",
-		}
+		log.Printf("pool warm: %d proxies ready", forwarder.Pool.Len())
+	}()
 
-		query := topics[rand.Intn(len(topics))]
-		searchURL := "http://www.google.com/search?q=" + url.QueryEscape(query)
-		req, _ := http.NewRequest("GET", searchURL, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Println("Google request failed:", err)
-			continue
-		} else {
-			fmt.Println("Google response:", resp.Status)
-			if resp.StatusCode == 200 {
-				body, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					panic(err)
-				}
-
-				err = os.WriteFile("result.html", body, 0644)
-				if err != nil {
-					panic(err)
-				}
-
-				fmt.Println("Saved response to result.html | len:", len(body))
-				return
-				
-			}
-		}
-
-		resp.Body.Close()
+	if err := server.ListenAndServe(cfg, forwarder); err != nil {
+		log.Fatal(err)
 	}
 }
